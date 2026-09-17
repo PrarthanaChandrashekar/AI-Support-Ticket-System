@@ -35,6 +35,7 @@ def detect_anomalies(df: pd.DataFrame) -> dict:
                 "reason": "High or Critical ticket is unresolved and older than 24 hours",
                 "priority": row["priority"],
                 "status": row["status"],
+                "created_at": row["created_at"].strftime("%Y-%m-%d %H:%M"),
                 "age_hours": round(float((reference_time - row["created_at"]).total_seconds() / 3600), 2),
             }
         )
@@ -47,6 +48,7 @@ def detect_anomalies(df: pd.DataFrame) -> dict:
                 "reason": f"Resolution time exceeds the IQR threshold of {long_threshold:.2f} hours",
                 "priority": row["priority"],
                 "status": row["status"],
+                "created_at": row["created_at"].strftime("%Y-%m-%d %H:%M"),
                 "resolution_time_hrs": round(float(row["resolution_time_hrs"]), 2),
             }
         )
