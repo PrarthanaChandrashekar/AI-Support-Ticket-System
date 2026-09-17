@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
-
 import pandas as pd
+
+from app.anomaly_detector import detect_anomalies
 
 
 # ============================================================
@@ -11,68 +11,32 @@ import pandas as pd
 
 def _apply_date_filter(
     df: pd.DataFrame,
-    date_range: dict[str, Any],
-    use_resolution_date: bool = False
+    date_range: dict | None
 ) -> pd.DataFrame:
 
     if not date_range:
         return df
 
-    if df.empty:
-        return df
-
     period = date_range.get("period")
 
-    # --------------------------------------------------------
-    # USE ACTUAL RESOLUTION DATE
-    #
-    # resolution date =
-    # created_at + resolution_time_hrs
-    # --------------------------------------------------------
+    if not period:
+        return df
 
-    if use_resolution_date:
-
-        result = df[
-            df["resolution_time_hrs"].notna()
-        ].copy()
-
-        result["resolved_at"] = (
-            result["created_at"]
-            +
-            pd.to_timedelta(
-                result["resolution_time_hrs"],
-                unit="h"
-            )
-        )
-
-        date_column = result["resolved_at"]
-
-    else:
-
-        result = df.copy()
-
-        date_column = result["created_at"]
-
-    if result.empty:
-        return result
-
-    latest_date = date_column.max()
-
-    # --------------------------------------------------------
-    # THIS MONTH
-    # --------------------------------------------------------
+    reference_time = df["created_at"].max()
 
     if period == "this_month":
 
-        return result[
-            date_column.dt.to_period("M")
-            ==
-            latest_date.to_period("M")
-        ]
+        start = reference_time.replace(
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
 
-    # --------------------------------------------------------
-    # THIS WEEK / LAST 7 DAYS
-    # --------------------------------------------------------
+        return df[
+            df["created_at"] >= start
+        ]
 
     if period in {
         "this_week",
@@ -80,198 +44,375 @@ def _apply_date_filter(
     }:
 
         cutoff = (
-            latest_date
-            -
-            pd.Timedelta(days=7)
+            reference_time
+            - pd.Timedelta(days=7)
         )
 
-        return result[
-            date_column >= cutoff
+        return df[
+            df["created_at"] >= cutoff
         ]
 
-    return result
+    if period == "today":
+
+        start = reference_time.normalize()
+
+        return df[
+            df["created_at"] >= start
+        ]
+
+    if period == "yesterday":
+
+        end = reference_time.normalize()
+
+        start = (
+            end
+            - pd.Timedelta(days=1)
+        )
+
+        return df[
+            (df["created_at"] >= start)
+            &
+            (df["created_at"] < end)
+        ]
+
+    if period == "this_year":
+
+        start = reference_time.replace(
+            month=1,
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        return df[
+            df["created_at"] >= start
+        ]
+
+    if period == "last_month":
+
+        first_this_month = reference_time.replace(
+            day=1,
+            hour=0,
+            minute=0,
+            second=0,
+            microsecond=0
+        )
+
+        last_month_start = (
+            first_this_month
+            - pd.DateOffset(months=1)
+        )
+
+        return df[
+            (df["created_at"] >= last_month_start)
+            &
+            (df["created_at"] < first_this_month)
+        ]
+
+    return df
 
 
 # ============================================================
-# APPLY FILTERS
+# GENERAL FILTERS
 # ============================================================
 
 def _apply_filters(
     df: pd.DataFrame,
-    filters: dict[str, Any],
-    plan_metric: str | None = None
+    filters: dict
 ) -> pd.DataFrame:
+
+    if not filters:
+        return df
 
     result = df.copy()
 
-    filters = dict(filters)
-
     # --------------------------------------------------------
-    # DATE RANGE
+    # CATEGORY
     # --------------------------------------------------------
 
-    date_range = filters.pop(
-        "date_range",
-        None
-    )
+    category = filters.get("category")
 
-    if isinstance(
-        date_range,
-        dict
-    ):
+    if category:
 
-        result = _apply_date_filter(
-            result,
-            date_range,
-            False
-        )
+        if isinstance(category, str):
+
+            result = result[
+                result["category"]
+                .astype(str)
+                .str.lower()
+                ==
+                category.lower()
+            ]
+
+        elif isinstance(category, list):
+
+            categories = {
+                str(value).lower()
+                for value in category
+            }
+
+            result = result[
+                result["category"]
+                .astype(str)
+                .str.lower()
+                .isin(categories)
+            ]
 
     # --------------------------------------------------------
-    # CRITICAL NOT RESOLVED WITHIN X HOURS
+    # PRIORITY
+    # --------------------------------------------------------
+
+    priority = filters.get("priority")
+
+    if priority:
+
+        if isinstance(priority, str):
+
+            result = result[
+                result["priority"]
+                .astype(str)
+                .str.lower()
+                ==
+                priority.lower()
+            ]
+
+        elif isinstance(priority, list):
+
+            priorities = {
+                str(value).lower()
+                for value in priority
+            }
+
+            result = result[
+                result["priority"]
+                .astype(str)
+                .str.lower()
+                .isin(priorities)
+            ]
+
+    # --------------------------------------------------------
+    # STATUS
+    # --------------------------------------------------------
+
+    status = filters.get("status")
+
+    # --------------------------------------------------------
+    # SPECIAL CASE:
     #
-    # Correct logic:
+    # "Critical tickets not resolved within 12 hours"
     #
     # Critical AND
     # (
     #     Open
     #     OR Escalated
-    #     OR Resolved with resolution_time > X
+    #     OR Resolved with resolution_time > 12
     # )
-    #
-    # The normal status filter must NOT be applied afterward.
-    # Otherwise the resolved tickets with long resolution times
-    # would be removed.
     # --------------------------------------------------------
 
-    custom_flag = filters.pop(
-        "custom_unresolved_critical_gt_12",
-        False
+    critical_not_resolved = filters.get(
+        "critical_not_resolved_within_hours"
     )
 
-    # Remove the normal status filter when this custom rule
-    # is active because the custom rule handles status itself.
-    if custom_flag:
+    if critical_not_resolved is not None:
 
-        filters.pop(
-            "status",
-            None
+        limit = float(
+            critical_not_resolved
         )
 
-    limit_hours = filters.pop(
-        "critical_resolution_limit_hours",
-        12
-    )
-
-    if custom_flag:
+        result = result[
+            result["priority"]
+            .astype(str)
+            .str.lower()
+            ==
+            "critical"
+        ]
 
         result = result[
             (
-                result["priority"]
+                result["status"]
+                .astype(str)
+                .str.lower()
+                .isin(
+                    {
+                        "open",
+                        "escalated"
+                    }
+                )
+            )
+            |
+            (
+                result["status"]
+                .astype(str)
+                .str.lower()
                 ==
-                "Critical"
+                "resolved"
             )
             &
             (
-                result["status"].isin(
-                    [
-                        "Open",
-                        "Escalated"
-                    ]
-                )
-                |
-                (
-                    result["resolution_time_hrs"]
-                    >
-                    float(limit_hours)
-                )
+                result["resolution_time_hrs"]
+                > limit
             )
         ]
 
+        # Do NOT apply the normal status filter here.
+        status = None
+
     # --------------------------------------------------------
-    # ALLOWED TEXT COLUMNS
+    # NORMAL STATUS FILTER
     # --------------------------------------------------------
 
-    allowed_columns = {
-        "category",
-        "priority",
-        "status",
-        "agent_id",
-        "ticket_id"
+    if status:
+
+        if isinstance(status, str):
+
+            result = result[
+                result["status"]
+                .astype(str)
+                .str.lower()
+                ==
+                status.lower()
+            ]
+
+        elif isinstance(status, list):
+
+            statuses = {
+                str(value).lower()
+                for value in status
+            }
+
+            result = result[
+                result["status"]
+                .astype(str)
+                .str.lower()
+                .isin(statuses)
+            ]
+
+    # --------------------------------------------------------
+    # AGENT
+    # --------------------------------------------------------
+
+    agent_id = filters.get("agent_id")
+
+    if agent_id:
+
+        if isinstance(agent_id, str):
+
+            result = result[
+                result["agent_id"]
+                .astype(str)
+                .str.lower()
+                ==
+                agent_id.lower()
+            ]
+
+        elif isinstance(agent_id, list):
+
+            agents = {
+                str(value).lower()
+                for value in agent_id
+            }
+
+            result = result[
+                result["agent_id"]
+                .astype(str)
+                .str.lower()
+                .isin(agents)
+            ]
+
+    # --------------------------------------------------------
+    # TICKET ID
+    # --------------------------------------------------------
+
+    ticket_id = filters.get("ticket_id")
+
+    if ticket_id:
+
+        if isinstance(ticket_id, str):
+
+            result = result[
+                result["ticket_id"]
+                .astype(str)
+                .str.lower()
+                ==
+                ticket_id.lower()
+            ]
+
+        elif isinstance(ticket_id, list):
+
+            ticket_ids = {
+                str(value).lower()
+                for value in ticket_id
+            }
+
+            result = result[
+                result["ticket_id"]
+                .astype(str)
+                .str.lower()
+                .isin(ticket_ids)
+            ]
+
+    # --------------------------------------------------------
+    # NUMERIC FILTERS
+    # --------------------------------------------------------
+
+    numeric_columns = {
+        "response_time_hrs",
+        "resolution_time_hrs",
+        "customer_rating"
     }
 
-    for column, value in filters.items():
+    for column in numeric_columns:
 
-        if column in allowed_columns:
+        condition = filters.get(column)
 
-            if isinstance(
-                value,
-                list
-            ):
+        if not condition:
+            continue
 
-                result = result[
-                    result[column].isin(value)
-                ]
+        if not isinstance(
+            condition,
+            dict
+        ):
+            continue
 
-            else:
+        if column not in result.columns:
+            continue
 
-                result = result[
-                    result[column]
-                    ==
-                    value
-                ]
+        if "gt" in condition:
 
-        # ----------------------------------------------------
-        # NUMERIC FILTERS
-        # ----------------------------------------------------
+            result = result[
+                result[column]
+                > float(condition["gt"])
+            ]
 
-        elif column in {
-            "response_time_hrs",
-            "resolution_time_hrs",
-            "customer_rating"
-        }:
+        if "gte" in condition:
 
-            if not isinstance(
-                value,
-                dict
-            ):
+            result = result[
+                result[column]
+                >= float(condition["gte"])
+            ]
 
-                continue
+        if "lt" in condition:
 
-            for operator, number in value.items():
+            result = result[
+                result[column]
+                < float(condition["lt"])
+            ]
 
-                number = float(number)
+        if "lte" in condition:
 
-                if operator == "greater_than":
+            result = result[
+                result[column]
+                <= float(condition["lte"])
+            ]
 
-                    result = result[
-                        result[column]
-                        >
-                        number
-                    ]
+        if "eq" in condition:
 
-                elif operator == "greater_than_or_equal":
-
-                    result = result[
-                        result[column]
-                        >=
-                        number
-                    ]
-
-                elif operator == "less_than":
-
-                    result = result[
-                        result[column]
-                        <
-                        number
-                    ]
-
-                elif operator == "less_than_or_equal":
-
-                    result = result[
-                        result[column]
-                        <=
-                        number
-                    ]
+            result = result[
+                result[column]
+                == float(condition["eq"])
+            ]
 
     return result
 
@@ -282,374 +423,459 @@ def _apply_filters(
 
 def execute_query(
     df: pd.DataFrame,
-    plan: dict[str, Any]
-) -> dict[str, Any]:
+    plan: dict
+):
 
     operation = plan.get(
-        "operation"
+        "operation",
+        "count"
+    )
+
+    metric = plan.get(
+        "metric"
+    )
+
+    group_by = plan.get(
+        "group_by"
     )
 
     filters = plan.get(
-        "filters"
-    ) or {}
-
-    filtered = _apply_filters(
-        df,
-        filters,
-        plan.get("metric")
+        "filters",
+        {}
     )
 
-    # ========================================================
+    if not isinstance(
+        filters,
+        dict
+    ):
+        filters = {}
+
+    # --------------------------------------------------------
+    # ANOMALY DETECTION
+    # --------------------------------------------------------
+
+    if operation == "anomaly":
+
+        anomaly_result = detect_anomalies(
+            df
+        )
+
+        date_range = filters.get(
+            "date_range"
+        )
+
+        # ----------------------------------------------------
+        # ONLY RESOLUTION-TIME ANOMALIES
+        #
+        # The question:
+        # "Are there any anomalies in resolution times?"
+        #
+        # refers specifically to:
+        # long_resolution_time
+        #
+        # It should NOT include:
+        # old_unresolved_priority
+        # ----------------------------------------------------
+
+        resolution_anomalies = [
+            anomaly
+            for anomaly
+            in anomaly_result.get(
+                "anomalies",
+                []
+            )
+            if anomaly.get("type")
+            ==
+            "long_resolution_time"
+        ]
+
+        # ----------------------------------------------------
+        # DATE FILTER
+        # ----------------------------------------------------
+
+        if isinstance(
+            date_range,
+            dict
+        ):
+
+            period = date_range.get(
+                "period"
+            )
+
+            if period in {
+                "this_week",
+                "last_7_days"
+            }:
+
+                reference_time = (
+                    df["created_at"].max()
+                )
+
+                cutoff = (
+                    reference_time
+                    -
+                    pd.Timedelta(days=7)
+                )
+
+                resolution_anomalies = [
+                    anomaly
+                    for anomaly
+                    in resolution_anomalies
+                    if pd.to_datetime(
+                        anomaly["created_at"]
+                    )
+                    >= cutoff
+                ]
+
+        # ----------------------------------------------------
+        # RETURN ONLY RESOLUTION-TIME ANOMALIES
+        # ----------------------------------------------------
+
+        anomaly_result["anomalies"] = (
+            resolution_anomalies
+        )
+
+        anomaly_result["summary"] = {
+
+            "total_anomalies":
+                len(
+                    resolution_anomalies
+                ),
+
+            "long_resolution_time":
+                len(
+                    resolution_anomalies
+                ),
+
+            "old_unresolved_priority":
+                0
+        }
+
+        return anomaly_result
+
+    # --------------------------------------------------------
+    # DATE FILTER
+    # --------------------------------------------------------
+
+    date_range = filters.get(
+        "date_range"
+    )
+
+    filtered_df = _apply_date_filter(
+        df,
+        date_range
+    )
+
+    # --------------------------------------------------------
+    # OTHER FILTERS
+    # --------------------------------------------------------
+
+    filtered_df = _apply_filters(
+        filtered_df,
+        filters
+    )
+
+    # --------------------------------------------------------
     # COUNT
-    # ========================================================
+    # --------------------------------------------------------
 
     if operation == "count":
 
         return {
-            "count":
-                int(
-                    len(filtered)
-                )
+            "count": int(
+                len(filtered_df)
+            )
         }
 
-    # ========================================================
+    # --------------------------------------------------------
     # AVERAGE
-    # ========================================================
+    # --------------------------------------------------------
 
     if operation == "average":
 
-        metric = plan.get(
-            "metric"
-        )
+        if metric not in filtered_df.columns:
 
-        if metric not in {
-            "response_time_hrs",
-            "resolution_time_hrs",
-            "customer_rating"
-        }:
+            return {
+                "average": None,
+                "count": 0
+            }
 
-            raise ValueError(
-                "Average metric is not supported"
-            )
+        values = pd.to_numeric(
+            filtered_df[metric],
+            errors="coerce"
+        ).dropna()
 
-        values = filtered[
-            metric
-        ].dropna()
+        if len(values) == 0:
+
+            return {
+                "average": None,
+                "count": 0
+            }
 
         return {
-            "metric":
-                metric,
-
-            "count":
-                int(
-                    len(values)
-                ),
-
-            "average":
-                (
-                    round(
-                        float(
-                            values.mean()
-                        ),
-                        2
-                    )
-                    if len(values)
-                    else None
-                )
+            "average": round(
+                float(values.mean()),
+                2
+            ),
+            "count": int(
+                len(values)
+            )
         }
 
-    # ========================================================
+    # --------------------------------------------------------
     # LIST
-    # ========================================================
+    # --------------------------------------------------------
 
     if operation == "list":
 
-        rows = filtered.copy()
+        columns = [
+            "ticket_id",
+            "created_at",
+            "category",
+            "priority",
+            "status",
+            "response_time_hrs",
+            "resolution_time_hrs",
+            "agent_id",
+            "customer_rating",
+            "issue_summary"
+        ]
 
-        rows["created_at"] = (
-            rows["created_at"]
-            .dt.strftime(
-                "%Y-%m-%d %H:%M"
+        available_columns = [
+            column
+            for column in columns
+            if column in filtered_df.columns
+        ]
+
+        records = filtered_df[
+            available_columns
+        ].copy()
+
+        if "created_at" in records.columns:
+
+            records["created_at"] = (
+                records["created_at"]
+                .dt.strftime(
+                    "%Y-%m-%d %H:%M"
+                )
             )
+
+        return records.to_dict(
+            orient="records"
         )
 
-        # Remove helper column before returning
-        if "resolved_at" in rows.columns:
-
-            rows = rows.drop(
-                columns=[
-                    "resolved_at"
-                ]
-            )
-
-        rows = rows.where(
-            pd.notna(rows),
-            None
-        )
-
-        return {
-            "count":
-                int(
-                    len(rows)
-                ),
-
-            "tickets":
-                rows.to_dict(
-                    orient="records"
-                )[:100]
-        }
-
-    # ========================================================
+    # --------------------------------------------------------
     # GROUP BY
-    # ========================================================
+    # --------------------------------------------------------
 
     if operation == "group_by":
 
-        group_by = plan.get(
-            "group_by"
+        if group_by not in filtered_df.columns:
+
+            return []
+
+        if metric == "ticket_id":
+            grouped = (
+                filtered_df
+                .groupby(group_by)["ticket_id"]
+                .count()
+                .reset_index(name="count")
+                .sort_values("count", ascending=False)
+            )
+
+            return grouped.to_dict(
+                orient="records"
+            )
+
+
+        if metric:
+            if metric not in filtered_df.columns:
+                return []
+
+            grouped = (
+                filtered_df
+                .groupby(group_by)[metric]
+                .agg(["count", "mean"])
+                .reset_index()
+            )
+
+            grouped["mean"] = grouped["mean"].round(2)
+
+            return grouped.to_dict(
+                orient="records"
+            )
+
+        grouped = (
+            filtered_df
+            .groupby(group_by)
+            .size()
+            .reset_index(
+                name="count"
+            )
         )
 
-        metric = plan.get(
-            "metric",
-            "count"
+        return grouped.to_dict(
+            orient="records"
         )
 
-        if group_by not in {
-            "agent_id",
-            "category",
-            "priority",
-            "status"
-        }:
-
-            raise ValueError(
-                "Group-by field is not supported"
-            )
-
-        # ----------------------------------------------------
-        # RESOLVED TICKET COUNT
-        # ----------------------------------------------------
-
-        if metric == "resolved_ticket_count":
-
-            filtered = filtered[
-                filtered["status"]
-                ==
-                "Resolved"
-            ]
-
-            grouped = (
-                filtered
-                .groupby(
-                    group_by
-                )
-                .size()
-                .reset_index(
-                    name="count"
-                )
-            )
-
-            grouped = (
-                grouped
-                .sort_values(
-                    "count",
-                    ascending=False
-                )
-            )
-
-        # ----------------------------------------------------
-        # NORMAL COUNT
-        # ----------------------------------------------------
-
-        elif metric == "count":
-
-            grouped = (
-                filtered
-                .groupby(
-                    group_by
-                )
-                .size()
-                .reset_index(
-                    name="count"
-                )
-            )
-
-            grouped = (
-                grouped
-                .sort_values(
-                    "count",
-                    ascending=False
-                )
-            )
-
-        # ----------------------------------------------------
-        # AVERAGE CUSTOMER RATING
-        # ----------------------------------------------------
-
-        elif metric == (
-            "average_customer_rating"
-        ):
-
-            grouped = (
-                filtered
-                .groupby(
-                    group_by
-                )[
-                    "customer_rating"
-                ]
-                .mean()
-                .round(2)
-                .reset_index(
-                    name=
-                    "average_customer_rating"
-                )
-                .sort_values(
-                    "average_customer_rating",
-                    ascending=False
-                )
-            )
-
-        else:
-
-            raise ValueError(
-                "Group-by metric is not supported"
-            )
-
-        return {
-            "groups":
-                grouped.to_dict(
-                    orient="records"
-                )
-        }
+    # --------------------------------------------------------
+    # UNKNOWN OPERATION
+    # --------------------------------------------------------
 
     raise ValueError(
-        f"Unsupported query operation: "
-        f"{operation}"
+        f"Unsupported operation: {operation}"
     )
 
 
 # ============================================================
-# CREATE HUMAN-READABLE ANSWER
+# ANSWER TEXT
 # ============================================================
 
 def answer_text(
     question: str,
-    plan: dict[str, Any],
-    result: dict[str, Any]
+    plan: dict,
+    result
 ) -> str:
 
     operation = plan.get(
         "operation"
     )
 
-    # ========================================================
+    metric = plan.get(
+        "metric"
+    )
+
+    # --------------------------------------------------------
+    # ANOMALY
+    # --------------------------------------------------------
+
+    if operation == "anomaly":
+
+        summary = result.get(
+            "summary",
+            {}
+        )
+
+        total = summary.get(
+            "total_anomalies",
+            0
+        )
+
+        if total == 0:
+
+            return (
+                "No resolution-time anomalies "
+                "were detected for the requested period."
+            )
+
+        return (
+            f"I found {total} resolution-time "
+            f"anomalies for the requested period."
+        )
+
+    # --------------------------------------------------------
     # COUNT
-    # ========================================================
+    # --------------------------------------------------------
 
     if operation == "count":
 
-        return (
-            f"There are "
-            f"{result['count']} "
-            f"matching tickets."
+        count = result.get(
+            "count",
+            0
         )
 
-    # ========================================================
+        return (
+            f"There are {count} tickets "
+            f"matching the requested criteria."
+        )
+
+    # --------------------------------------------------------
     # AVERAGE
-    # ========================================================
+    # --------------------------------------------------------
 
     if operation == "average":
 
-        if result["average"] is None:
+        average = result.get(
+            "average"
+        )
+
+        count = result.get(
+            "count",
+            0
+        )
+
+        if average is None:
 
             return (
-                "There is not enough data "
-                "to calculate that average."
+                f"No valid {metric} values "
+                f"were found for the requested criteria."
             )
 
         return (
-            f"The average "
-            f"{result['metric']} is "
-            f"{result['average']} across "
-            f"{result['count']} tickets."
+            f"The average {metric} is "
+            f"{average} across {count} tickets."
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # LIST
-    # ========================================================
+    # --------------------------------------------------------
 
     if operation == "list":
 
+        count = len(result)
+
+        if count == 0:
+
+            return (
+                "No tickets matched "
+                "the requested criteria."
+            )
+
         return (
-            f"I found "
-            f"{result['count']} "
-            f"matching tickets."
+            f"I found {count} tickets "
+            f"matching the requested criteria."
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # GROUP BY
-    # ========================================================
+    # --------------------------------------------------------
 
     if operation == "group_by":
 
-        groups = result.get(
-            "groups",
-            []
-        )
-
-        if not groups:
+        if not result:
 
             return (
-                "No matching grouped results "
-                "were found."
+                "No tickets matched "
+                "the requested criteria."
             )
 
-        # ----------------------------------------------------
-        # RESOLVED TICKET RANKING
-        # ----------------------------------------------------
-
-        if plan.get(
-            "metric"
-        ) == "resolved_ticket_count":
-
-            top_count = groups[0]["count"]
-
-            group_column = plan.get(
-                "group_by"
-            )
-
-            leaders = [
-                row[group_column]
-                for row in groups
-                if row.get("count")
-                ==
-                top_count
-            ]
-
-            if len(leaders) == 1:
-
-                return (
-                    f"{leaders[0]} "
-                    f"resolved the most tickets, "
-                    f"with {top_count} "
-                    f"resolved tickets."
-                )
-
-            return (
-                f"The top agents are "
-                f"{', '.join(leaders)}, "
-                f"tied at {top_count} "
-                f"resolved tickets."
-            )
-
-        # ----------------------------------------------------
-        # OTHER GROUPED QUERIES
-        # ----------------------------------------------------
-
-        return (
-            "Here are the grouped results, "
-            "sorted from highest to lowest."
+        group_by = plan.get(
+            "group_by"
         )
 
-    return (
-        "The query was completed."
-    )
+        # ----------------------------------------------------
+        # Find largest group
+        # ----------------------------------------------------
+
+        if all(
+            "count" in row
+            for row in result
+        ):
+
+            top = max(
+                result,
+                key=lambda row: row["count"]
+            )
+
+            return (
+                f"{top[group_by]} has the most "
+                f"tickets, with {top['count']} tickets."
+            )
+
+        return str(result)
+
+    # --------------------------------------------------------
+    # FALLBACK
+    # --------------------------------------------------------
+
+    return str(result)
