@@ -21,9 +21,7 @@ def _apply_date_filter(
     if df.empty:
         return df
 
-    period = date_range.get(
-        "period"
-    )
+    period = date_range.get("period")
 
     # --------------------------------------------------------
     # USE ACTUAL RESOLUTION DATE
@@ -35,45 +33,30 @@ def _apply_date_filter(
     if use_resolution_date:
 
         result = df[
-            df[
-                "resolution_time_hrs"
-            ].notna()
+            df["resolution_time_hrs"].notna()
         ].copy()
 
         result["resolved_at"] = (
-
             result["created_at"]
-
             +
-
             pd.to_timedelta(
-
-                result[
-                    "resolution_time_hrs"
-                ],
-
+                result["resolution_time_hrs"],
                 unit="h"
             )
         )
 
-        date_column = (
-            result["resolved_at"]
-        )
+        date_column = result["resolved_at"]
 
     else:
 
         result = df.copy()
 
-        date_column = (
-            result["created_at"]
-        )
+        date_column = result["created_at"]
 
     if result.empty:
         return result
 
-    latest_date = (
-        date_column.max()
-    )
+    latest_date = date_column.max()
 
     # --------------------------------------------------------
     # THIS MONTH
@@ -97,14 +80,9 @@ def _apply_date_filter(
     }:
 
         cutoff = (
-
             latest_date
-
             -
-
-            pd.Timedelta(
-                days=7
-            )
+            pd.Timedelta(days=7)
         )
 
         return result[
@@ -126,9 +104,7 @@ def _apply_filters(
 
     result = df.copy()
 
-    filters = dict(
-        filters
-    )
+    filters = dict(filters)
 
     # --------------------------------------------------------
     # DATE RANGE
@@ -153,67 +129,60 @@ def _apply_filters(
     # --------------------------------------------------------
     # CRITICAL NOT RESOLVED WITHIN X HOURS
     #
-    # Critical AND
+    # Correct logic:
     #
+    # Critical AND
     # (
     #     Open
     #     OR Escalated
-    #     OR resolution_time > X
+    #     OR Resolved with resolution_time > X
     # )
+    #
+    # The normal status filter must NOT be applied afterward.
+    # Otherwise the resolved tickets with long resolution times
+    # would be removed.
     # --------------------------------------------------------
 
     custom_flag = filters.pop(
-
         "custom_unresolved_critical_gt_12",
-
         False
     )
 
+    # Remove the normal status filter when this custom rule
+    # is active because the custom rule handles status itself.
+    if custom_flag:
+
+        filters.pop(
+            "status",
+            None
+        )
+
     limit_hours = filters.pop(
-
         "critical_resolution_limit_hours",
-
         12
     )
 
     if custom_flag:
 
         result = result[
-
             (
-                result[
-                    "priority"
-                ]
+                result["priority"]
                 ==
                 "Critical"
             )
-
             &
-
             (
-
-                result[
-                    "status"
-                ].isin(
+                result["status"].isin(
                     [
                         "Open",
                         "Escalated"
                     ]
                 )
-
                 |
-
                 (
-
-                    result[
-                        "resolution_time_hrs"
-                    ]
-
+                    result["resolution_time_hrs"]
                     >
-
-                    float(
-                        limit_hours
-                    )
+                    float(limit_hours)
                 )
             )
         ]
@@ -223,7 +192,6 @@ def _apply_filters(
     # --------------------------------------------------------
 
     allowed_columns = {
-
         "category",
         "priority",
         "status",
@@ -241,17 +209,13 @@ def _apply_filters(
             ):
 
                 result = result[
-                    result[
-                        column
-                    ].isin(value)
+                    result[column].isin(value)
                 ]
 
             else:
 
                 result = result[
-                    result[
-                        column
-                    ]
+                    result[column]
                     ==
                     value
                 ]
@@ -261,7 +225,6 @@ def _apply_filters(
         # ----------------------------------------------------
 
         elif column in {
-
             "response_time_hrs",
             "resolution_time_hrs",
             "customer_rating"
@@ -276,9 +239,7 @@ def _apply_filters(
 
             for operator, number in value.items():
 
-                number = float(
-                    number
-                )
+                number = float(number)
 
                 if operator == "greater_than":
 
@@ -333,11 +294,8 @@ def execute_query(
     ) or {}
 
     filtered = _apply_filters(
-
         df,
-
         filters,
-
         plan.get("metric")
     )
 
@@ -348,7 +306,6 @@ def execute_query(
     if operation == "count":
 
         return {
-
             "count":
                 int(
                     len(filtered)
@@ -366,7 +323,6 @@ def execute_query(
         )
 
         if metric not in {
-
             "response_time_hrs",
             "resolution_time_hrs",
             "customer_rating"
@@ -381,7 +337,6 @@ def execute_query(
         ].dropna()
 
         return {
-
             "metric":
                 metric,
 
@@ -391,7 +346,6 @@ def execute_query(
                 ),
 
             "average":
-
                 (
                     round(
                         float(
@@ -399,9 +353,7 @@ def execute_query(
                         ),
                         2
                     )
-
                     if len(values)
-
                     else None
                 )
         }
@@ -415,11 +367,7 @@ def execute_query(
         rows = filtered.copy()
 
         rows["created_at"] = (
-
-            rows[
-                "created_at"
-            ]
-
+            rows["created_at"]
             .dt.strftime(
                 "%Y-%m-%d %H:%M"
             )
@@ -440,7 +388,6 @@ def execute_query(
         )
 
         return {
-
             "count":
                 int(
                     len(rows)
@@ -468,7 +415,6 @@ def execute_query(
         )
 
         if group_by not in {
-
             "agent_id",
             "category",
             "priority",
@@ -486,23 +432,17 @@ def execute_query(
         if metric == "resolved_ticket_count":
 
             filtered = filtered[
-                filtered[
-                    "status"
-                ]
+                filtered["status"]
                 ==
                 "Resolved"
             ]
 
             grouped = (
-
                 filtered
-
                 .groupby(
                     group_by
                 )
-
                 .size()
-
                 .reset_index(
                     name="count"
                 )
@@ -523,15 +463,11 @@ def execute_query(
         elif metric == "count":
 
             grouped = (
-
                 filtered
-
                 .groupby(
                     group_by
                 )
-
                 .size()
-
                 .reset_index(
                     name="count"
                 )
@@ -554,24 +490,18 @@ def execute_query(
         ):
 
             grouped = (
-
                 filtered
-
                 .groupby(
                     group_by
                 )[
                     "customer_rating"
                 ]
-
                 .mean()
-
                 .round(2)
-
                 .reset_index(
                     name=
                     "average_customer_rating"
                 )
-
                 .sort_values(
                     "average_customer_rating",
                     ascending=False
@@ -585,7 +515,6 @@ def execute_query(
             )
 
         return {
-
             "groups":
                 grouped.to_dict(
                     orient="records"
@@ -619,7 +548,6 @@ def answer_text(
     if operation == "count":
 
         return (
-
             f"There are "
             f"{result['count']} "
             f"matching tickets."
@@ -631,9 +559,7 @@ def answer_text(
 
     if operation == "average":
 
-        if result[
-            "average"
-        ] is None:
+        if result["average"] is None:
 
             return (
                 "There is not enough data "
@@ -641,7 +567,6 @@ def answer_text(
             )
 
         return (
-
             f"The average "
             f"{result['metric']} is "
             f"{result['average']} across "
@@ -655,7 +580,6 @@ def answer_text(
     if operation == "list":
 
         return (
-
             f"I found "
             f"{result['count']} "
             f"matching tickets."
@@ -687,27 +611,16 @@ def answer_text(
             "metric"
         ) == "resolved_ticket_count":
 
-            top_count = groups[
-                0
-            ][
-                "count"
-            ]
+            top_count = groups[0]["count"]
 
             group_column = plan.get(
                 "group_by"
             )
 
             leaders = [
-
-                row[
-                    group_column
-                ]
-
+                row[group_column]
                 for row in groups
-
-                if row.get(
-                    "count"
-                )
+                if row.get("count")
                 ==
                 top_count
             ]
@@ -715,7 +628,6 @@ def answer_text(
             if len(leaders) == 1:
 
                 return (
-
                     f"{leaders[0]} "
                     f"resolved the most tickets, "
                     f"with {top_count} "
@@ -723,7 +635,6 @@ def answer_text(
                 )
 
             return (
-
                 f"The top agents are "
                 f"{', '.join(leaders)}, "
                 f"tied at {top_count} "
